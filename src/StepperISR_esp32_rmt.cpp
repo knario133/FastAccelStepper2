@@ -62,7 +62,7 @@ static void IRAM_ATTR apply_command(StepperQueue *q, bool fill_part_one,
       // second invocation to stop.
       rmt_tx_stop(q->channel);
       rmt_rx_stop(q->channel);
-      rmt_memory_rw_rst(q->channel);
+      rmt_tx_memory_reset(q->channel);
       q->_rmtStopped = true;
     }
     q->_isRunning = false;
@@ -298,7 +298,7 @@ void StepperQueue::startQueue_rmt() {
 #endif
   rmt_tx_stop(channel);
   rmt_rx_stop(channel);
-  rmt_memory_rw_rst(channel);
+  rmt_tx_memory_reset(channel);
   uint32_t *mem = FAS_RMT_MEM(channel);
   for (uint8_t i = 0; i < 64; i += 2) {
     mem[i + 0] = 0x0fff8fff;
