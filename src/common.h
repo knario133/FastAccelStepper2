@@ -153,9 +153,10 @@ struct queue_end_s {
 #error "Unsupported derivate"
 #endif
 
-// For esp32 using arduino, just use arduino definition
-#define fasEnableInterrupts interrupts
-#define fasDisableInterrupts noInterrupts
+// For esp32 using arduino, use spinlock
+extern portMUX_TYPE fas_spinlock;
+#define fasEnableInterrupts() portEXIT_CRITICAL(&fas_spinlock)
+#define fasDisableInterrupts() portENTER_CRITICAL(&fas_spinlock)
 
 #if ESP_IDF_VERSION_MAJOR == 4
 #define __ESP32_IDF_V44__
@@ -215,8 +216,9 @@ struct queue_end_s {
 //
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#define fasDisableInterrupts portDISABLE_INTERRUPTS
-#define fasEnableInterrupts portENABLE_INTERRUPTS
+extern portMUX_TYPE fas_spinlock;
+#define fasDisableInterrupts() portENTER_CRITICAL(&fas_spinlock)
+#define fasEnableInterrupts() portEXIT_CRITICAL(&fas_spinlock)
 
 // Only since esp-idf v4.4 MCPWM_TIMER0_PHASE_DIRECTION_S is defined. So use
 // this to distinguish between the two versions
