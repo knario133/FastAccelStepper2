@@ -10,6 +10,8 @@
 #include <stdio.h>
 #endif
 
+#ifndef SUPPORT_ESP32
+
 #define UPM_FROM_PARTS(mantissa, exponent) \
   ((((uint16_t)exponent) << 8) | ((uint8_t)(mantissa)))
 
@@ -332,6 +334,8 @@ upm_float upm_square(upm_float x) {  // TESTED
   mantissa = pgm_read_byte_near(&square_table[mantissa]);
   return UPM_FROM_PARTS(mantissa, exponent);
 }
+upm_float upm_reciprocal(upm_float x); // forward decl
+
 upm_float upm_divide(upm_float x, upm_float y) {
   return upm_multiply(x, upm_reciprocal(y));
 }
@@ -393,6 +397,9 @@ upm_float upm_rsqrt(upm_float x) {  // TESTED
   }
   return UPM_FROM_PARTS(mantissa, exponent);
 }
+
+#endif
+#ifndef SUPPORT_ESP32
 upm_float upm_rsquare(upm_float x) {  // TESTED
   uint8_t mantissa = x & 0x00ff;
   uint8_t exponent = x >> 8;
@@ -422,3 +429,4 @@ upm_float upm_reciprocal(upm_float x) {  // TESTED
   }
   return UPM_FROM_PARTS(mantissa, exponent);
 }
+#endif

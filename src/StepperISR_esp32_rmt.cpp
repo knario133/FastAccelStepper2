@@ -39,10 +39,14 @@ int tp2 = 0;
 // second.
 #define PART_SIZE 31
 
+static bool _dir_change_pending[8] = {false};
+
 static void IRAM_ATTR apply_command(StepperQueue *q, bool fill_part_one,
                                     uint32_t *data) {
+  uint32_t *data_end = data + PART_SIZE;
   if (!fill_part_one) {
     data += PART_SIZE;
+    data_end += PART_SIZE;
   }
   uint8_t rp = q->read_idx;
   if (rp == q->next_write_idx) {
@@ -161,13 +165,17 @@ static void IRAM_ATTR apply_command(StepperQueue *q, bool fill_part_one,
       // The command has been completed
       rp++;
       q->read_idx = rp;
-      // The dir pin toggle at this place is problematic, but if the last
-      // command contains only one step, it could work
-      if (rp == q->next_write_idx) {
+      if (rp != q->next_write_idx) {
         struct queue_entry *e_next = &q->entry[rp & QUEUE_LEN_MASK];
         if (e_next->toggle_dir) {
-          gpio_num_t dirPin = (gpio_num_t)q->dirPin;
-          gpio_set_level(dirPin, gpio_get_level(dirPin) ^ 1);
+          // stop the transmission to allow direction change
+          _dir_change_pending[q->channel] = true;
+          RMT.conf_ch[q->channel].conf1.tx_conti_mode = 0;
+          // fill the rest of the buffer with pauses
+          while (data < data_end) {
+            *data++ = 0;
+          }
+          return;
         }
       }
     } else {
@@ -176,14 +184,33 @@ static void IRAM_ATTR apply_command(StepperQueue *q, bool fill_part_one,
   }
 }
 
-#define PROCESS_CHANNEL(ch) \
-  if (mask & RMT_CH ## ch ## _TX_END_INT_ST) { \
-    apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], false, FAS_RMT_MEM(ch)); \
-  } \
-  if (mask & RMT_CH ## ch ## _TX_THR_EVENT_INT_ST) { \
-    apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], true, FAS_RMT_MEM(ch)); \
-    /* now repeat the interrupt at buffer size + end marker */ \
-    RMT.tx_lim_ch[ch].limit = PART_SIZE * 2 + 1; \
+#define PROCESS_CHANNEL(ch)                                                    \
+  if (_dir_change_pending[ch]) {                                               \
+    if (mask & RMT_CH##ch##_TX_END_INT_ST) {                                   \
+      gpio_num_t dirPin =                                                      \
+          (gpio_num_t)fas_queue[QUEUES_MCPWM_PCNT + ch].dirPin;                \
+      gpio_set_level(dirPin, gpio_get_level(dirPin) ^ 1);                      \
+      _dir_change_pending[ch] = false;                                         \
+      RMT.conf_ch[ch].conf1.mem_rd_rst = 1;                                    \
+      RMT.conf_ch[ch].conf1.mem_wr_rst = 1;                                    \
+      RMT.conf_ch[ch].conf1.mem_rd_rst = 0;                                    \
+      RMT.conf_ch[ch].conf1.mem_wr_rst = 0;                                    \
+      uint32_t *mem = FAS_RMT_MEM(ch);                                         \
+      apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], true, mem);            \
+      apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], false, mem);           \
+      RMT.conf_ch[ch].conf1.tx_conti_mode = 1;                                 \
+      RMT.conf_ch[ch].conf1.tx_start = 1;                                      \
+    }                                                                          \
+  } else {                                                                     \
+    if (mask & RMT_CH##ch##_TX_END_INT_ST) {                                   \
+      apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], false,                 \
+                    FAS_RMT_MEM(ch));                                          \
+    }                                                                          \
+    if (mask & RMT_CH##ch##_TX_THR_EVENT_INT_ST) {                             \
+      apply_command(&fas_queue[QUEUES_MCPWM_PCNT + ch], true, FAS_RMT_MEM(ch)); \
+      /* now repeat the interrupt at buffer size + end marker */                 \
+      RMT.tx_lim_ch[ch].limit = PART_SIZE * 2 + 1;                             \
+    }                                                                          \
   }
 
 

@@ -16,6 +16,10 @@ static uint16_t fas_debug_led_cnt = 0;
 // dynamic allocation seems to not work so well on avr
 FastAccelStepper fas_stepper[MAX_STEPPER];
 
+#if defined(SUPPORT_ESP32)
+portMUX_TYPE fas_spinlock = portMUX_INITIALIZER_UNLOCKED;
+#endif
+
 //*************************************************************************************************
 //*************************************************************************************************
 void FastAccelStepperEngine::init() { fas_init_engine(this, 255); }
