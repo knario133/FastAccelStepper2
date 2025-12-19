@@ -1,68 +1,62 @@
-# Informe de Evaluación Técnica: Librería FastAccelStepper en ESP32
+# Informe de Evaluación Técnica y Optimización: FastAccelStepper en ESP32 con Driver DRV8825
 
-Este informe detalla la evaluación del funcionamiento de la librería `FastAccelStepper` en la plataforma ESP32, enfocándose en la generación de rampas, lógica de control, torque, tiempos de respuesta y manejo de concurrencia (FreeRTOS).
+Este informe consolida el análisis técnico de la librería `FastAccelStepper` en la plataforma ESP32, integrando los hallazgos sobre la arquitectura software y las limitaciones específicas del hardware del driver TI DRV8825 (basado en su hoja de datos).
 
-## 1. Defectos Críticos de Concurrencia y Threading (FreeRTOS)
+## 1. Análisis del Driver DRV8825 (Documentación Adjunta)
 
-### Problema: Race Conditions en Sistemas Dual-Core
-La librería utiliza las macros `fasDisableInterrupts()` y `fasEnableInterrupts()` para proteger secciones críticas. En ESP32, estas se definen como `portDISABLE_INTERRUPTS` y `portENABLE_INTERRUPTS` (en `common.h`).
+Según el manual del DRV8825 (específicamente la sección **7.6 Timing Requirements**, Página 7), existen restricciones críticas que la librería debe respetar para garantizar un funcionamiento fiable y evitar pérdida de pasos.
 
-*   **Defecto**: En el ESP32 (que posee dos núcleos), `portDISABLE_INTERRUPTS` solo deshabilita las interrupciones **en el núcleo actual**. No impide que una interrupción o una tarea en el **otro núcleo** acceda a los mismos datos compartidos.
-*   **Impacto**: Si la tarea de control (`StepperTask`) se ejecuta en el Núcleo 1 y la interrupción (ISR) del motor se ejecuta en el Núcleo 0 (o viceversa), existe una condición de carrera (race condition).
-    *   Variables críticas como `read_idx`, `next_write_idx` en `StepperQueue` podrían corromperse si no se garantiza la atomicidad o el orden de memoria correcto.
-    *   Estructuras compartidas como `_ro` y `_rw` en `RampGenerator` son copiadas byte a byte. Si una interrupción o tarea interrumpe esta copia desde otro núcleo, se pueden leer datos inconsistentes (mezcla de datos viejos y nuevos).
-*   **Corrección Recomendada**:
-    *   Utilizar **Spinlocks** (`portENTER_CRITICAL` / `portEXIT_CRITICAL`) para proteger el acceso a variables compartidas entre ISR y Tareas en un entorno multicore. Esto asegura que el otro núcleo espere antes de acceder a la sección crítica.
+### 1.1. Limitaciones de Frecuencia y Ancho de Pulso
+*   **Especificación**:
+    *   Frecuencia máxima de pasos (`f_STEP`): **250 kHz**.
+    *   Duración mínima de pulso en ALTO (`t_WH(STEP)`): **1.9 µs**.
+    *   Duración mínima de pulso en BAJO (`t_WL(STEP)`): **1.9 µs**.
+*   **Análisis en Librería**:
+    *   La implementación RMT (`StepperISR_esp32_rmt.cpp`) genera pulsos con un ciclo de trabajo del 50%.
+    *   A la frecuencia máxima del driver (250 kHz), el periodo es de 4.0 µs (2.0 µs ALTO / 2.0 µs BAJO). Esto cumple con el mínimo de 1.9 µs con un margen muy estrecho (100 ns).
+    *   **Riesgo**: Si el usuario configura una velocidad superior a 250 kHz (que el ESP32 puede generar fácilmente), el ancho del pulso caerá por debajo de 1.9 µs, violando la especificación del driver y causando que el motor no reconozca los pasos.
+*   **Recomendación**: Implementar un límite de software (`MAX_SPEED_HZ`) configurable, predeterminado a 250,000 para este driver, o emitir advertencias si `setSpeedInHz` excede este valor.
 
-### Problema: Prioridad de Tarea Excesiva
-*   **Observación**: `StepperTask` se crea con prioridad `configMAX_PRIORITIES`.
-*   **Impacto**: Esto puede causar inanición (starvation) de otras tareas críticas del sistema (como WiFi o Bluetooth) si la gestión de steppers toma demasiado tiempo.
-*   **Mejora**: Evaluar si una prioridad tan alta es estrictamente necesaria o si se puede reducir ligeramente, confiando en el buffer de la cola (`QUEUE_LEN`) para absorber latencias.
+### 1.2. Tiempos de Setup y Hold (Dirección)
+*   **Especificación**:
+    *   Tiempo de Setup (`t_SU(STEP)`): **650 ns** (La dirección debe estar estable 650ns antes del flanco de subida del paso).
+*   **Defecto Crítico Detectado en RMT**:
+    *   En la implementación actual para ESP32 RMT, el cambio de dirección (`gpio_set_level`) ocurre dentro de la interrupción (`tx_intr_handler`) que recarga el buffer.
+    *   Debido a la naturaleza de doble buffer (ping-pong) del RMT, la interrupción se dispara mientras el hardware aún está transmitiendo el bloque anterior de pasos.
+    *   **Consecuencia**: El pin `DIR` cambia de estado **mientras se envían los últimos pasos del movimiento anterior**, violando el tiempo de *setup* y potencialmente invirtiendo la dirección de los últimos pasos. Esto es fatal para la precisión posicional.
+*   **Recomendación**: Modificar la lógica de cambio de dirección en RMT para asegurar que el buffer anterior se haya vaciado completamente antes de conmutar el pin `DIR`. Esto puede requerir insertar un periodo de "silencio" o espera explícita.
 
-## 2. Precisión Matemática y Lógica de Rampas
+### 1.3. Modos de Energía (Sleep)
+*   **Especificación**:
+    *   Tiempo de Wakeup (`t_WAKE`): **1.7 ms** (máximo) desde que `nSLEEP` pasa a alto hasta que se aceptan pasos.
+*   **Recomendación**: Si se utiliza la gestión automática de energía (`setAutoEnable`), el usuario debe configurar `stepper->setDelayToEnable(1700)` para respetar este tiempo de encendido, ya que el valor por defecto puede ser insuficiente.
 
-### Problema: Uso de `PoorManFloat` en ESP32
-La librería utiliza una implementación propia de punto flotante de 8-bit (`PoorManFloat`) diseñada para microcontroladores AVR de 8 bits sin FPU (Unidad de Punto Flotante).
+## 2. Defectos de Arquitectura Software (ESP32 / FreeRTOS)
 
-*   **Defecto**: El ESP32 cuenta con una **FPU de precisión simple (float)** por hardware que es extremadamente rápida.
-*   **Impacto**:
-    *   **Pérdida de Precisión**: `PoorManFloat` tiene una mantisa de solo 8 bits (~2.4 dígitos decimales). Esto introduce errores de redondeo significativos en los cálculos de aceleración y velocidad, lo que puede causar **jitter** (variación en el tiempo entre pasos). El jitter reduce el torque efectivo y aumenta la vibración.
-    *   **Ineficiencia**: Emular punto flotante por software (con tablas de búsqueda y desplazamientos) en un chip con FPU hardware es innecesario.
-*   **Corrección Recomendada**:
-    *   Reemplazar `PoorManFloat` por `float` nativo (IEEE 754) en la implementación para ESP32. Esto mejorará drásticamente la precisión del cálculo de tiempos (`ticks`) y la suavidad del movimiento.
+### 2.1. Condiciones de Carrera (Race Conditions)
+*   **Problema**: Uso de `noInterrupts()` (`portDISABLE_INTERRUPTS`) en un entorno Dual-Core.
+*   **Impacto**: Esta macro solo deshabilita interrupciones en el núcleo actual. Si la tarea del stepper corre en el Núcleo 1 y la interrupción ocurre en el Núcleo 0, las variables críticas (`_ro`, `_rw`, colas) pueden corromperse.
+*   **Solución**: Implementar **Spinlocks** de FreeRTOS (`portENTER_CRITICAL` / `portEXIT_CRITICAL`) para garantizar exclusión mutua real entre núcleos.
 
-### Problema: Perfil de Aceleración Limitado (Solo Trapezoidal)
-La librería implementa únicamente rampas de aceleración constante (perfil trapezoidal de velocidad).
+### 2.2. Precisión Matemática (`PoorManFloat`)
+*   **Problema**: Uso de una librería propia de punto flotante de 8 bits (`PoorManFloat`) para calcular aceleraciones.
+*   **Impacto**: Introduce errores de redondeo y *jitter* (variación de tiempo) en los trenes de pulsos. Innecesario en ESP32, que posee una FPU de hardware (IEEE 754 float) extremadamente rápida.
+*   **Solución**: Reemplazar `PoorManFloat` por `float` nativo en la compilación condicional para ESP32. Esto mejorará la suavidad del movimiento y el torque a altas velocidades.
 
-*   **Defecto**: En un perfil trapezoidal, el cambio de aceleración es instantáneo (Jerk infinito) al inicio y al final de la rampa.
-*   **Impacto en Torque**:
-    *   Los cambios bruscos de aceleración inducen vibraciones mecánicas que pueden superar el torque de retención del motor, causando **pérdida de pasos** o estancamiento (stall), especialmente a altas velocidades o con cargas inerciales.
-*   **Mejora**:
-    *   Implementar curvas de aceleración en **S (S-Curve)**. Esto limita el "Jerk" (la derivada de la aceleración), suavizando las transiciones. Esto permite alcanzar mayores velocidades y aceleraciones sin perder torque, ya que se evita excitar las frecuencias de resonancia del sistema mecánico.
+### 2.3. Perfil de Movimiento
+*   **Problema**: Perfil de aceleración trapezoidal (aceleración constante).
+*   **Impacto**: Cambios bruscos de aceleración (Jerk infinito) que excitan resonancias mecánicas y reducen el torque utilizable.
+*   **Solución**: Implementar curvas en **S (S-Curve)** para suavizar el arranque y la parada, permitiendo mayores aceleraciones sin perder pasos.
 
-## 3. Respuesta y Gestión de Colas
+## 3. Plan de Acción Recomendado
 
-### Latencia de Respuesta
-*   **Observación**: La cola de comandos tiene una longitud fija (`QUEUE_LEN = 32`).
-*   **Impacto**: Cualquier cambio en la velocidad o posición destino se agrega al final de la cola. El motor debe ejecutar todos los comandos previos antes de reaccionar al cambio.
-*   **Mejora**: Aunque existe `forceStop()` para paradas de emergencia, para cambios dinámicos de velocidad se podría implementar una función que modifique los comandos existentes en la cola o permita una "limpieza segura" parcial para una respuesta más ágil.
+1.  **Refactorización de Concurrencia**:
+    *   Sustituir macros de interrupción por bloques críticos (`portENTER_CRITICAL`) en `FastAccelStepper.cpp` y `StepperISR_esp32*.cpp`.
+2.  **Corrección del Bug de Dirección (RMT)**:
+    *   Rediseñar la máquina de estados en `StepperISR_esp32_rmt.cpp` para sincronizar el cambio de `DIR` con el fin real de la transmisión RMT (posiblemente esperando la interrupción `RMT_CHn_TX_END_INT_ST` antes de cambiar el pin, en lugar de hacerlo en `TX_THR_EVENT`).
+3.  **Optimización Matemática**:
+    *   Crear una versión de `RampCalculator` que use `float` para ESP32.
+4.  **Configuración para DRV8825**:
+    *   Documentar o crear un preset que establezca `MAX_SPEED_HZ = 250000` y `DELAY_TO_ENABLE = 1700`.
 
-### Riesgo de "Queue Starvation" a Altas Velocidades
-*   **Observación**: A muy altas velocidades, cada comando en la cola representa un tiempo muy corto. Si la tarea `manageSteppers` (que corre cada 4ms) no rellena la cola lo suficientemente rápido, esta se vacía.
-*   **Lógica Actual**: La librería intenta agrupar múltiples pasos en un solo comando (`planning_steps`) para mitigar esto.
-*   **Riesgo**: Si la lógica de agrupación falla o el sistema está muy cargado, el motor puede tartamudear.
-*   **Mejora**: Aumentar el tamaño de la cola en ESP32 (donde la RAM es abundante) de 32 a 64 o 128 entradas proporcionaría un buffer de seguridad mayor.
-
-## 4. Implementación Hardware (Driver ESP32)
-
-### Complejidad en MCPWM/PCNT
-*   **Observación**: La implementación `StepperISR_esp32_mcpwm_pcnt.cpp` es ingeniosa pero compleja. Utiliza el PCNT (contador de pulsos) para contar los pasos generados por el PWM y disparar una interrupción.
-*   **Defecto Potencial**: Hay lógica compleja para manejar casos donde la interrupción llega "tarde" (`if (PCNT.conf_unit[pcnt_unit].conf2.cnt_h_lim != steps)`). Esto sugiere que el sistema está operando cerca de sus límites temporales.
-*   **Mejora**: Simplificar la lógica o confiar más en el hardware RMT (Remote Control Peripheral) que suele ser más robusto para generación de trenes de pulsos precisos sin tanta intervención de la CPU.
-
-## Resumen de Recomendaciones
-
-1.  **Seguridad en Hilos**: Reemplazar `fasDisableInterrupts` con `portENTER_CRITICAL` en las secciones críticas de ESP32 para evitar corrupción de memoria entre núcleos.
-2.  **Precisión**: Eliminar `PoorManFloat` y usar `float` estándar para aprovechar la FPU del ESP32 y eliminar el jitter de cálculo.
-3.  **Torque y Suavidad**: Implementar rampas **S-Curve** para reducir vibraciones y maximizar el torque útil.
-4.  **Buffer**: Aumentar `QUEUE_LEN` en ESP32 para mayor robustez a altas velocidades.
+Este conjunto de mejoras transformará la fiabilidad de la librería para aplicaciones profesionales con ESP32 y drivers industriales como el DRV8825.
