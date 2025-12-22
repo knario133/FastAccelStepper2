@@ -15,6 +15,7 @@
 // even this is actually a constant table
 struct mapping_s {
   mcpwm_unit_t mcpwm_unit;
+  mcpwm_dev_t *mcpwm_dev;
   uint8_t timer;
   mcpwm_io_signals_t pwm_output_pin;
   pcnt_unit_t pcnt_unit;
@@ -27,6 +28,7 @@ struct mapping_s {
 static struct mapping_s channel2mapping[NUM_QUEUES] = {
     {
       mcpwm_unit : MCPWM_UNIT_0,
+      mcpwm_dev : &MCPWM0,
       timer : 0,
       pwm_output_pin : MCPWM0A,
       pcnt_unit : PCNT_UNIT_0,
@@ -37,6 +39,7 @@ static struct mapping_s channel2mapping[NUM_QUEUES] = {
     },
     {
       mcpwm_unit : MCPWM_UNIT_0,
+      mcpwm_dev : &MCPWM0,
       timer : 1,
       pwm_output_pin : MCPWM1A,
       pcnt_unit : PCNT_UNIT_1,
@@ -47,6 +50,7 @@ static struct mapping_s channel2mapping[NUM_QUEUES] = {
     },
     {
       mcpwm_unit : MCPWM_UNIT_0,
+      mcpwm_dev : &MCPWM0,
       timer : 2,
       pwm_output_pin : MCPWM2A,
       pcnt_unit : PCNT_UNIT_2,
@@ -57,6 +61,7 @@ static struct mapping_s channel2mapping[NUM_QUEUES] = {
     },
     {
       mcpwm_unit : MCPWM_UNIT_1,
+      mcpwm_dev : &MCPWM1,
       timer : 0,
       pwm_output_pin : MCPWM0A,
       pcnt_unit : PCNT_UNIT_3,
@@ -67,6 +72,7 @@ static struct mapping_s channel2mapping[NUM_QUEUES] = {
     },
     {
       mcpwm_unit : MCPWM_UNIT_1,
+      mcpwm_dev : &MCPWM1,
       timer : 1,
       pwm_output_pin : MCPWM1A,
       pcnt_unit : PCNT_UNIT_4,
@@ -77,6 +83,7 @@ static struct mapping_s channel2mapping[NUM_QUEUES] = {
     },
     {
       mcpwm_unit : MCPWM_UNIT_1,
+      mcpwm_dev : &MCPWM1,
       timer : 2,
       pwm_output_pin : MCPWM2A,
       pcnt_unit : PCNT_UNIT_5,
@@ -107,8 +114,7 @@ static void IRAM_ATTR apply_command(StepperQueue *queue,
                                     const struct queue_entry *e) {
   const struct mapping_s *mapping =
       (const struct mapping_s *)queue->driver_data;
-  mcpwm_unit_t mcpwm_unit = mapping->mcpwm_unit;
-  mcpwm_dev_t *mcpwm = mcpwm_unit == MCPWM_UNIT_0 ? &MCPWM0 : &MCPWM1;
+  mcpwm_dev_t *mcpwm = mapping->mcpwm_dev;
   pcnt_unit_t pcnt_unit = mapping->pcnt_unit;
   uint8_t timer = mapping->timer;
   uint8_t steps = e->steps;
@@ -219,8 +225,7 @@ static void IRAM_ATTR init_stop(StepperQueue *q) {
   // because the second command is entered too late
   // and after the last command aka running out of commands.
   const struct mapping_s *mapping = (const struct mapping_s *)q->driver_data;
-  mcpwm_unit_t mcpwm_unit = mapping->mcpwm_unit;
-  mcpwm_dev_t *mcpwm = mcpwm_unit == MCPWM_UNIT_0 ? &MCPWM0 : &MCPWM1;
+  mcpwm_dev_t *mcpwm = mapping->mcpwm_dev;
   uint8_t timer = mapping->timer;
 #ifndef __ESP32_IDF_V44__
   mcpwm->timer[timer].mode.start = 0;  // 0: stop at TEZ
@@ -315,7 +320,7 @@ void StepperQueue::init_mcpwm_pcnt(uint8_t channel_num, uint8_t step_pin) {
   driver_data = (void *)mapping;
 
   mcpwm_unit_t mcpwm_unit = mapping->mcpwm_unit;
-  mcpwm_dev_t *mcpwm = mcpwm_unit == MCPWM_UNIT_0 ? &MCPWM0 : &MCPWM1;
+  mcpwm_dev_t *mcpwm = mapping->mcpwm_dev;
   pcnt_unit_t pcnt_unit = mapping->pcnt_unit;
   uint8_t timer = mapping->timer;
 
@@ -467,8 +472,7 @@ void StepperQueue::startQueue_mcpwm_pcnt() {
   digitalWrite(TEST_PROBE, digitalRead(TEST_PROBE) == HIGH ? LOW : HIGH);
 #endif
   const struct mapping_s *mapping = (const struct mapping_s *)driver_data;
-  mcpwm_unit_t mcpwm_unit = mapping->mcpwm_unit;
-  mcpwm_dev_t *mcpwm = mcpwm_unit == MCPWM_UNIT_0 ? &MCPWM0 : &MCPWM1;
+  mcpwm_dev_t *mcpwm = mapping->mcpwm_dev;
   uint8_t timer = mapping->timer;
 
   // apply_command() assumes the pcnt counter to contain executed steps
@@ -497,8 +501,7 @@ bool StepperQueue::isReadyForCommands_mcpwm_pcnt() {
     return true;
   }
   const struct mapping_s *mapping = (const struct mapping_s *)driver_data;
-  mcpwm_unit_t mcpwm_unit = mapping->mcpwm_unit;
-  mcpwm_dev_t *mcpwm = mcpwm_unit == MCPWM_UNIT_0 ? &MCPWM0 : &MCPWM1;
+  mcpwm_dev_t *mcpwm = mapping->mcpwm_dev;
   uint8_t timer = mapping->timer;
 #ifndef __ESP32_IDF_V44__
   if (mcpwm->timer[timer].status.value > 1) {
