@@ -158,7 +158,7 @@ extern portMUX_TYPE fas_spinlock;
 #define fasEnableInterrupts() portEXIT_CRITICAL(&fas_spinlock)
 #define fasDisableInterrupts() portENTER_CRITICAL(&fas_spinlock)
 
-#if ESP_IDF_VERSION_MAJOR == 4
+#if ESP_IDF_VERSION_MAJOR >= 4
 #define __ESP32_IDF_V44__
 #include <driver/periph_ctrl.h>
 #include <soc/periph_defs.h>
